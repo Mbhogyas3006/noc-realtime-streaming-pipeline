@@ -1,78 +1,69 @@
-# NOC Real-Time Network Event Streaming Pipeline
+# Real-Time Network Event Streaming Pipeline
 
-> **End-to-end real-time data engineering pipeline** built on Kafka, Spark Structured Streaming, Delta Lake, Apache Airflow, and Snowflake — processing network telemetry events from a simulated Network Operations Center (NOC) environment.
+Real-time data engineering pipeline processing network telemetry events at 500+ events per second — Apache Kafka ingestion, PySpark Structured Streaming, Delta Lake medallion architecture, Apache Airflow orchestration, and Snowflake analytics serving layer.
 
-[![Kafka](https://img.shields.io/badge/Apache_Kafka-Streaming-black)]()
-[![Spark](https://img.shields.io/badge/PySpark-Structured_Streaming-orange)]()
-[![Delta Lake](https://img.shields.io/badge/Delta_Lake-3.0-blue)]()
-[![Airflow](https://img.shields.io/badge/Apache_Airflow-2.8-green)]()
-[![Snowflake](https://img.shields.io/badge/Snowflake-Serving_Layer-cyan)]()
+![Kafka](https://img.shields.io/badge/Apache%20Kafka-231F20?style=flat&logo=apachekafka&logoColor=white)
+![Spark](https://img.shields.io/badge/Apache%20Spark-E25A1C?style=flat&logo=apachespark&logoColor=white)
+![Delta Lake](https://img.shields.io/badge/Delta%20Lake-00ADD8?style=flat)
+![Airflow](https://img.shields.io/badge/Apache%20Airflow-017CEE?style=flat&logo=apacheairflow&logoColor=white)
+![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?style=flat&logo=snowflake&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat&logo=docker&logoColor=white)
 
 ---
 
 ## Business Context
 
-A Network Operations Center (NOC) monitors thousands of network devices — switches, routers, and firewalls — across data centers and branch offices. Every device emits telemetry events every few seconds: CPU utilization, memory usage, packet loss, security alerts, and link state changes.
+Network Operations Centers monitor hundreds of devices — routers, switches, and firewalls — that emit telemetry events continuously. Every event carries operational intelligence: a CPU spike may indicate an overloaded switch, a packet loss spike may signal a failing link, and an unusual traffic pattern may indicate a security incident.
 
-The challenge: with 10+ events per second per device, batch processing is too slow. By the time an overnight job runs, a critical device failure from 6 hours ago has already caused a service outage.
+Batch processing is insufficient for this workload. A device failure processed in an overnight batch job could mean six hours of undetected downtime. Security incidents grow in severity every minute they go undetected.
 
-**This pipeline solves it** by processing events in real time — detecting anomalies, computing SLA metrics, and surfacing security threats within seconds of occurrence.
+This pipeline ingests network telemetry events in real time, processes them through a Bronze/Silver/Gold medallion architecture, and surfaces operational KPIs in Snowflake within seconds of occurrence. A dual micro-batch design separates critical alerts — which need a 10-second response window — from standard analytics, which run on a 60-second cadence.
 
 ---
 
 ## Architecture
 
 ```
-Network Devices (simulated)
-        │  10 events/sec
-        ▼
-┌───────────────────┐
-│   Apache Kafka    │  Topic: network-events
-│   3 partitions    │  Retention: 24 hours
-└────────┬──────────┘
-         │ Structured Streaming
-         ▼
-┌─────────────────────────────────────────────────────────┐
-│                  Delta Lake (ADLS Gen2)                  │
-│                                                          │
-│  BRONZE                SILVER               ALERTS       │
-│  Raw parsed      →    Enriched        →    CRITICAL      │
-│  JSON events          Typed fields         events only   │
-│  30s micro-batch      Anomaly flags        10s latency   │
-│                       SLA breach flags                    │
-│                            │                             │
-│                            ▼                             │
-│                          GOLD                            │
-│                  device_health_kpis                      │
-│                  alert_summary                           │
-│                  network_reliability                     │
-│                  security_threats                        │
-└─────────────────────────────────────────────────────────┘
-         │ Airflow DAG (hourly)
-         ▼
-┌───────────────────┐      ┌──────────────────────┐
-│  Apache Airflow   │      │     Snowflake         │
-│  Orchestration    │─────▶│  NOC_DB.GOLD schema   │
-│  Monitoring       │      │  4 clustered tables   │
-│  Alerting         │      │  5 analytics views    │
-└───────────────────┘      └──────────┬───────────┘
-                                      │
-                           ┌──────────▼───────────┐
-                           │  Power BI Dashboard   │
-                           │  SLA · Alerts · Threats│
-                           └──────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    NETWORK DEVICE SIMULATOR                      │
+│   36 devices · 4 event types · 500+ events/sec                   │
+│   Switches · Routers · Firewalls                                 │
+└────────────────────────────────┬─────────────────────────────────┘
+                                 │
+                                 ▼  Apache Kafka
+                                 │  Topic: network-events
+                                 │  3 partitions · key = device_id
+                                 │
+┌────────────────────────────────▼─────────────────────────────────┐
+│                         Delta Lake — ADLS Gen2                   │
+│                                                                  │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐.  │
+│  │     BRONZE       │  │      SILVER      │  │     ALERTS    │   │
+│  │                  │  │                  │  │               │   │
+│  │  Raw JSON events │  │  Typed fields    │  │  CRITICAL only│   │
+│  │  30s micro-batch │→ │  Anomaly flags   │  │  10s latency  │   │
+│  │  Schema-on-read  │  │  SLA breach flags│  │  Isolated path│   │
+│  │                  │  │  60s micro-batch │  │               │   │
+│  └─────────────────-┘  └────────┬────────-┘  └───────────────┘   │
+│                                │                                 │
+│                                ▼  Hourly batch                   │
+│                          ┌─────────────────────────────────┐     │
+│                          │             GOLD                │     │
+│                          │  device_health_kpis             │     │
+│                          │  alert_summary                  │     │
+│                          │  network_reliability            │     │
+│                          │  security_threats               │     │
+│                          └─────────────────┬───────────────┘     │
+└────────────────────────────────────────────┼───────────────────--┘
+                                             │  Airflow DAG (hourly)
+                                             │  Kafka health check
+                                             │  COPY INTO Snowflake
+                                             ▼
+                                       Snowflake
+                                    4 clustered tables
+                                    5 analytics views
+                                       Power BI
 ```
-
----
-
-## Event Types
-
-| Event | Description | Key metrics |
-|---|---|---|
-| `device_health` | CPU, memory, temperature | utilization %, health score |
-| `interface_stats` | Bandwidth, packet loss | loss %, bytes in/out |
-| `security_alert` | Port scans, auth failures, DDoS | threat level, packet count |
-| `link_state` | Interface up/down/flapping | state change, reason |
 
 ---
 
@@ -80,54 +71,55 @@ Network Devices (simulated)
 
 | Layer | Technology |
 |---|---|
-| Event streaming | Apache Kafka (3 partitions, 24h retention) |
-| Stream processing | PySpark Structured Streaming (micro-batch 30s) |
-| Storage format | Delta Lake 3.0 (ACID, time travel, schema evolution) |
-| Orchestration | Apache Airflow 2.8 (hourly DAG, branching, alerting) |
-| Serving layer | Snowflake (clustered tables, RBAC, analytics views) |
-| Local development | Docker Compose (Kafka + Zookeeper + Kafka UI) |
-| Language | Python 3.11, PySpark, SQL |
+| Event streaming | Apache Kafka 3.x — 3 partitions, 24h retention |
+| Stream processing | PySpark Structured Streaming — micro-batch |
+| Storage format | Delta Lake 3.0 — ACID, checkpointing, time travel |
+| Orchestration | Apache Airflow 2.8 — hourly DAG with branching |
+| Serving layer | Snowflake — clustered tables, RBAC, 5 analytics views |
+| Local development | Docker Compose — Kafka, Zookeeper, Kafka UI |
+| Language | Python, PySpark, SQL |
+
+---
+
+## Event Types
+
+| Event | Frequency | Key Metrics |
+|---|---|---|
+| `device_health` | Every 30s per device | CPU %, memory %, temperature °C, uptime |
+| `interface_stats` | Every 60s per interface | Packet loss %, bandwidth utilization %, bytes in/out |
+| `security_alert` | On detection | Alert type, source IP, protocol, packet count |
+| `link_state` | On change | Interface state (up/down/flapping), reason |
 
 ---
 
 ## Repository Structure
 
 ```
-noc-realtime-streaming-pipeline/
-│
 ├── data/
-│   └── kafka_producer.py           # Simulates network device events → Kafka
+│   └── kafka_producer.py              # Simulates 36 network devices at 500+ events/sec
 │
 ├── notebooks/
-│   ├── 01_kafka_bronze_streaming.py # Kafka → Bronze Delta (Structured Streaming)
-│   ├── 02_silver_enrichment.py      # Bronze → Silver (parse, enrich, detect)
-│   └── 03_gold_kpis.py             # Silver → Gold (aggregated KPI tables)
+│   ├── 01_kafka_bronze_streaming.py   # Kafka → Bronze Delta (30s micro-batch)
+│   ├── 02_silver_enrichment.py        # Parse payload, enrich, detect anomalies
+│   └── 03_gold_kpis.py               # Hourly KPI aggregations → 4 Gold tables
 │
 ├── airflow/
 │   └── dags/
-│       └── noc_pipeline_dag.py      # Hourly Airflow DAG with alerting
+│       └── noc_pipeline_dag.py        # Hourly DAG — Kafka health check, branching, alerts
 │
 ├── sql/
-│   └── snowflake_setup.sql          # DDL, RBAC, views, analytics queries
+│   └── snowflake_setup.sql            # DDL, RBAC, 5 analytics views, 5 analytics queries
 │
-├── docker/
-│   └── docker-compose.yml           # Local Kafka + Zookeeper + Kafka UI
-│
-├── requirements.txt
-└── README.md
+└── docker/
+    └── docker-compose.yml             # Local Kafka + Zookeeper + Kafka UI
 ```
 
 ---
 
 ## Quick Start — Local Development
 
-### Prerequisites
-- Docker Desktop installed
-- Python 3.11+
-- Java 11+ (for PySpark)
-
-### Step 1 — Start Kafka locally
 ```bash
+# Start local Kafka environment
 cd docker
 docker-compose up -d
 
@@ -137,27 +129,18 @@ docker exec kafka kafka-topics.sh \
   --bootstrap-server localhost:9092 \
   --partitions 3 --replication-factor 1
 
-# Open Kafka UI at http://localhost:8080
-```
+# Kafka UI available at http://localhost:8080
 
-### Step 2 — Install dependencies
-```bash
+# Install Python dependencies
 pip install -r requirements.txt
-```
 
-### Step 3 — Start the event producer
-```bash
+# Start event producer (runs until stopped with Ctrl+C)
 python data/kafka_producer.py
-# Sends 10 events/sec to network-events topic
-# Press Ctrl+C to stop
-```
 
-### Step 4 — Run notebooks locally
-```bash
-# In a separate terminal — runs Bronze streaming job
+# Run Bronze streaming notebook (separate terminal)
 python notebooks/01_kafka_bronze_streaming.py
 
-# After Bronze runs, process Silver and Gold
+# After Bronze is running — process Silver and Gold
 python notebooks/02_silver_enrichment.py
 python notebooks/03_gold_kpis.py
 ```
@@ -166,57 +149,10 @@ python notebooks/03_gold_kpis.py
 
 ## Key Engineering Decisions
 
-| Decision | Choice | Reason |
-|---|---|---|
-| Micro-batch interval | 30s Bronze, 60s Silver, 10s Alerts | Balance latency vs cost |
-| Kafka partitions | 3 | Matches parallelism of Spark executors |
-| Delta partitioning | By event_date + severity | Matches dominant query patterns |
-| Alert separation | Separate Delta path for CRITICAL events | Faster 10s latency for alerts vs 60s for Silver |
-| Airflow branching | BranchPythonOperator on Kafka health | Avoids failed runs when no new data |
-| Snowflake clustering | event_date + location | NOC queries always filter on both |
-
----
-
-## Performance Notes
-
-- **Kafka throughput:** tested at 500+ events/sec locally, 50K+/sec in production cluster
-- **Bronze latency:** raw events in Delta within 30 seconds of Kafka publish
-- **Alert latency:** CRITICAL events isolated in separate 10-second micro-batch
-- **Snowflake queries:** clustered tables skip 70-80% of micro-partitions on date+location filters
-
----
-
-## Interview Talking Points
-
-**On Kafka:** "I used 3 partitions matching the number of Spark executors — that way each executor reads from exactly one partition with no shuffling at the consumer level. Partition key is device_id so all events from the same device land in the same partition, preserving ordering."
-
-**On Structured Streaming:** "I chose micro-batch over continuous processing — 30 second intervals give us near-real-time latency while being much more cost-efficient. The checkpointing ensures exactly-once semantics — if the job crashes and restarts, it picks up exactly where it left off from the Kafka offset stored in the checkpoint."
-
-**On Delta Lake for streaming:** "Delta's ACID guarantees matter here — if the Silver job fails mid-write, downstream Gold reads don't see partial data. Time travel also means we can debug by querying the exact state of Bronze at any point in the past."
-
-**On Airflow branching:** "The BranchPythonOperator checks if Kafka has new messages before triggering the notebooks. If there's no new data — say at 3am when devices are quiet — the DAG skips the Databricks jobs and saves cluster cost. Small detail but it matters in production."
-
----
-
-## Resume Bullets
-
-> "Designed and implemented a real-time network event streaming pipeline processing 500+ events/sec using Kafka, PySpark Structured Streaming, and Delta Lake — building Bronze/Silver/Gold medallion layers with 30-second ingest latency and isolated 10-second CRITICAL alert path"
-
-> "Built Apache Airflow orchestration DAG with Kafka health checks, branching logic, Databricks notebook triggers, Snowflake COPY INTO, and automated email alerting — replacing manual NOC monitoring with a fully automated hourly pipeline"
-
-> "Implemented Spark Structured Streaming micro-batch architecture with Delta Lake checkpointing for exactly-once semantics — ensuring zero data loss on job failure with automatic offset recovery"
-
----
-
-## LinkedIn / GitHub Description
-
-Real-Time NOC Network Event Streaming Pipeline — Kafka → PySpark Structured Streaming → Delta Lake Bronze/Silver/Gold → Apache Airflow orchestration → Snowflake serving layer. Processes synthetic network telemetry events (device health, security alerts, link state, interface stats) with 30-second ingest latency and isolated 10-second critical alert path. Includes local Docker Compose setup for Kafka development.
-
-`#Kafka` `#SparkStreaming` `#DeltaLake` `#Airflow` `#Snowflake` `#DataEngineering` `#RealTime` `#NOC`
-
----
-
-## Author
-
-**Bhogya Swetha Malladi** · Data Engineer · New York, NY
-*Apache Kafka · PySpark Structured Streaming · Delta Lake · Apache Airflow · Snowflake · Azure Databricks*
+| Decision | Rationale |
+|---|---|
+| 3 Kafka partitions | Matches Spark executor count. `device_id` as partition key preserves event ordering per device and ensures all events from one device land in the same partition |
+| Dual micro-batch design | Main Silver stream at 60 seconds serves analytics. A separate 10-second stream isolates CRITICAL events — device down, DDoS detected — for faster operational response without running the full pipeline at high frequency |
+| Delta Lake checkpointing | Exactly-once delivery on job restart. The checkpoint directory stores the last committed Kafka offset. On restart, Spark resumes from that offset — no duplicate records, no missed events |
+| Airflow BranchPythonOperator | Checks whether Kafka topic has new messages before triggering Databricks cluster spin-up. At off-peak hours with no new events, the DAG exits cleanly without incurring compute cost |
+| Snowflake clustering on `(event_date, location)` | NOC dashboard queries always filter on date range and location — clustering aligns micro-partition layout with the dominant query pattern |
